@@ -1,75 +1,186 @@
 import vtk
 import numpy as np
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d, UnivariateSpline
 import nibabel as nib
+import matplotlib.pyplot as plt
+
+# ============================================================================
 
 
-# ================================================== UTIL ==============================================================
-
-
-def read_vtk(file):
-    reader = vtk.vtkPolyDataReader()
-    reader.SetFileName(file)
-    reader.Update()
-
-    point_mapper = vtk.vtkPolyDataMapper()
-    point_mapper.SetInputData(reader.GetOutput())
-
-    point_actor = vtk.vtkActor()
-    point_actor.SetMapper(point_mapper)
-    point_actor.GetProperty().SetPointSize(5)
-
-    return point_actor
-
-
-def transform_polydata(actor):
-    mapper = actor.GetMapper()
-    poly = mapper.GetInput()
-    return poly
-
-
-def write_vtk(actor, filename):
-    polydata = transform_polydata(actor)
+def write_vtk(polydata, filename):
     writer = vtk.vtkPolyDataWriter()
     writer.SetFileName(filename + ".vtk")
     writer.SetInputData(polydata)
     writer.Write()
 
-# ==========================  SKELETON  ====================================
+
+def make_actors(vessels, dti):
+    tuber = vtk.vtkTubeFilter()
+    tuber.SetInputData(vessels)
+    tuber.SetNumberOfSides(6)
+    tuber.SetVaryRadiusToVaryRadiusByAbsoluteScalar()
+    tuber.Update()
+
+    # Setup actors and mappers
+    skeleton_mapper = vtk.vtkPolyDataMapper()
+    skeleton_mapper.SetInputData(vessels)
+    skeleton_mapper.SetScalarRange(vessels.GetScalarRange())
+
+    vessel_mapper = vtk.vtkPolyDataMapper()
+    vessel_mapper.SetInputConnection(tuber.GetOutputPort())
+    vessel_mapper.SetScalarRange(vessels.GetScalarRange())
+
+    skeleton_actor = vtk.vtkActor()
+    skeleton_actor.SetMapper(skeleton_mapper)
+
+    vessel_actor = vtk.vtkActor()
+    vessel_actor.SetMapper(vessel_mapper)
+
+    dti_mapper = vtk.vtkPolyDataMapper()
+    dti_mapper.SetInputData(dti)
+    dti_mapper.Update()
+
+    dti_actor = vtk.vtkActor()
+    dti_actor.SetMapper(dti_mapper)
+
+    return vessel_actor, skeleton_actor, dti_actor
 
 
-def in_bounds(a, x, y, z):
-    if x >= 0 and y >= 0 and z >= 0 and x < a.shape[0] and y < a.shape[1] and z < a.shape[2]:
-        return True
-    return False
+def make_axis_actor():
+    points = vtk.vtkPoints()
+    points.InsertNextPoint([0, 0, 0])  # 0: origo
+    points.InsertNextPoint([100, 0, 0])  # 1: x
+    points.InsertNextPoint([0, 100, 0])  # 2: y
+    points.InsertNextPoint([0, 0, 100])  # 3: z
+
+    x = vtk.vtkLine()
+    x.GetPointIds().SetId(0, 0)
+    x.GetPointIds().SetId(1, 1)
+
+    y = vtk.vtkLine()
+    y.GetPointIds().SetId(0, 0)
+    y.GetPointIds().SetId(1, 2)
+
+    z = vtk.vtkLine()
+    z.GetPointIds().SetId(0, 0)
+    z.GetPointIds().SetId(1, 3)
+
+    cells = vtk.vtkCellArray()
+    cells.InsertNextCell(x)
+    cells.InsertNextCell(y)
+    cells.InsertNextCell(z)
+
+    colors = vtk.vtkUnsignedCharArray()
+    colors.SetNumberOfComponents(3)
+    colors.InsertNextTuple3(255, 0, 0)
+    colors.InsertNextTuple3(0, 255, 0)
+    colors.InsertNextTuple3(0, 0, 255)
+
+    lines = vtk.vtkPolyData()
+    lines.SetPoints(points)
+    lines.SetLines(cells)
+    lines.GetCellData().SetScalars(colors)
+
+    mapper = vtk.vtkPolyDataMapper()
+    mapper.SetInputData(lines)
+
+    actor = vtk.vtkActor()
+    actor.SetMapper(mapper)
+
+    return actor
 
 
-def new_coord(a, look_up, i, j, k):
-    result = []
-    for x in range(-1, 2):
-        for y in range(-1, 2):
-            for z in range(-1, 2):
-                if (not (x == 0 and y == 0 and z == 0)) and in_bounds(a, i + x, j + y, k + z):
-                    if look_up[i + x, j + y, k + z] == -1 and a[i + x, j + y, k + z] > 0:
-                        result.append(i+x)
-                        result.append(j+y)
-                        result.append(k+z)
-                        return result
+def render(actors):
+    renderer = vtk.vtkRenderer()
 
-    return result
+    render_window = vtk.vtkRenderWindow()
+    render_window.AddRenderer(renderer)
+
+    interactor = vtk.vtkRenderWindowInteractor()
+    interactor.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
+    interactor.SetRenderWindow(render_window)
+
+    actors.append(make_axis_actor())
+
+    for actor in actors:
+        actor.GetProperty().SetRepresentationToWireframe()
+        renderer.AddActor(actor)
+
+    renderer.SetBackground(0.1, 0.2, 0.4)
+    render_window.SetSize(800, 800)
+
+    interactor.Initialize()
+
+    renderer.ResetCamera()
+    renderer.GetActiveCamera().Zoom(1.5)
+    render_window.Render()
+
+    interactor.Start()
 
 
-def neighbor_finder(a, look_up, points_array, i, j, k):
+# ============================= STATS ==========================================
+
+def make_stats(skeleton_array, diameter_array, sum_angles):
+    length = []
+    avg_diameter = []
+    for line in skeleton_array:
+        sum_diameter = 0
+        for point in line:
+            sum_diameter += diameter_array[point[0]][point[1]][point[2]]
+        length.append(len(line))
+        avg_diameter.append(sum_diameter / len(line))
+
+    plt.figure(1)
+    plt.subplot(221)
+    plt.xlabel('Segment lengths')
+    plt.ylabel('Average diameter in segment')
+    plt.plot(length, avg_diameter, 'bo')
+
+    plt.subplot(222)
+    plt.xlabel('Number of segment')
+    plt.xlabel('Length of segment')
+    plt.plot(np.sort(length))
+
+    plt.subplot(223)
+    plt.ylabel('Sum difference from x (red)(left to right), y (green)(forward), z (blue)(up) axis')
+    plt.plot(0, sum_angles[0], 'r*', 1, sum_angles[1], 'g*', 2, sum_angles[2], 'b*')
+    plt.show()
+
+
+# =========================== GENERATE ARRAYS =================================
+
+
+def make_skeleton(points_array):
+    look_up = np.zeros(points_array.shape)
+    look_up = look_up - 1
+
+    skeleton_points = []
+
+    for i in range(points_array.shape[0]):
+        for j in range(points_array.shape[1]):
+            for k in range(points_array.shape[2]):
+                if points_array[i, j, k] == 2:
+                    print("___________")
+                    end_point = neighbor_finder(points_array, look_up, skeleton_points, i, j, k)
+
+                    if points_array[i, j, k] == 1 or end_point == [i, j, k]:
+                        end_finder(end_point, points_array, skeleton_points)
+
+    print("======================")
+
+    return skeleton_points
+
+
+def neighbor_finder(array, look_up, skeleton_array, i, j, k):
     cont = True
     points = []
     while cont:
         cont = False
-        if a[i, j, k] > 0:  # and look_up[i, j, k] == -1:
-            # first iteration
+        if array[i, j, k] > 0:  # and look_up[i, j, k] == -1:
             if look_up[i, j, k] == -1:
                 print("new point: ", i, j, k)
                 points.append([i, j, k])
-                result = new_coord(a, look_up, i, j, k)
+                result = new_coord(array, look_up, i, j, k)
                 look_up[i, j, k] = 1
                 if len(result) == 3:
                     i = result[0]
@@ -79,8 +190,7 @@ def neighbor_finder(a, look_up, points_array, i, j, k):
             else:
                 points.append([i, j, k])
 
-    points_array.append(points)
-
+    skeleton_array.append(points)
     return [i, j, k]
 
 
@@ -101,92 +211,147 @@ def end_finder(point, points_array, skeleton_points):
         skeleton_points[-1].append(end_point)
 
 
-def make_skeleton(points_array, diameter_array):
-    look_up = np.zeros(points_array.shape)
-    look_up = look_up - 1
-
-    skeleton_points = []
-
-    for i in range(points_array.shape[0]):
-        for j in range(points_array.shape[1]):
-            for k in range(points_array.shape[2]):
-                """
-                for i in range(100,150):
-                    for j in range(100, 150):
-                        for k in range(100, 150):
-                """
-                if points_array[i, j, k] == 2:
-                    print("___________")
-                    end_point = neighbor_finder(points_array, look_up, skeleton_points, i, j, k)
-                    if points_array[i, j, k] == 1 or end_point == [i, j, k]:
-                        end_finder(end_point, points_array, skeleton_points)
-    print("======================")
-
-    tube_actor, line_actor = make_tubes(skeleton_points, diameter_array)
-
-    return tube_actor, line_actor
-
-# ============================== RENDERING ===========================================
+def in_bounds(array, x, y, z):
+    if x >= 0 and y >= 0 and z >= 0 and x < array.shape[0] and y < array.shape[1] and z < array.shape[2]:
+        return True
+    return False
 
 
-def make_polydata(points, r):
-    # fit a spline to points
-    x_spline = vtk.vtkKochanekSpline()
-    y_spline = vtk.vtkKochanekSpline()
-    z_spline = vtk.vtkKochanekSpline()
+def new_coord(array, look_up, i, j, k):
+    result = []
+    for x in range(-1, 2):
+        for y in range(-1, 2):
+            for z in range(-1, 2):
+                if (not (x == 0 and y == 0 and z == 0)) and in_bounds(array, i + x, j + y, k + z):
+                    if look_up[i + x, j + y, k + z] == -1 and array[i + x, j + y, k + z] > 0:
+                        result.append(i+x)
+                        result.append(j+y)
+                        result.append(k+z)
+                        return result
 
-    spline = vtk.vtkParametricSpline()
-    spline.SetXSpline(x_spline)
-    spline.SetYSpline(y_spline)
-    spline.SetZSpline(z_spline)
-    spline.SetPoints(points)
-
-    function_source = vtk.vtkParametricFunctionSource()
-    function_source.SetParametricFunction(spline)
-    function_source.Update()
-
-    # create radius
-    tube_radius = vtk.vtkDoubleArray()
-    n = function_source.GetOutput().GetNumberOfPoints()
-    tube_radius.SetNumberOfTuples(n)
-    tube_radius.SetName("TubeRadius")
-
-    radius = interp1d(np.linspace(0, 1, num=len(r), endpoint=True), r)
-
-    for i in range(n):
-        tube_radius.SetTuple1(i, radius(i / n))
-
-    # Add the scalars to the polydata
-    tube_poly_data = function_source.GetOutput()
-    tube_poly_data.GetPointData().AddArray(tube_radius)
-    tube_poly_data.GetPointData().SetActiveScalars("TubeRadius")
-
-    return tube_poly_data
+    return result
 
 
-def make_actors(tube_poly_data):
-    tuber = vtk.vtkTubeFilter()
-    tuber.SetInputData(tube_poly_data)
-    tuber.SetNumberOfSides(20)
-    tuber.SetVaryRadiusToVaryRadiusByAbsoluteScalar()
-    tuber.Update()
+# ============================================================
 
-    # Setup actors and mappers
-    line_mapper = vtk.vtkPolyDataMapper()
-    line_mapper.SetInputData(tube_poly_data)
-    line_mapper.SetScalarRange(tube_poly_data.GetScalarRange())
 
-    tube_mapper = vtk.vtkPolyDataMapper()
-    tube_mapper.SetInputConnection(tuber.GetOutputPort())
-    tube_mapper.SetScalarRange(tube_poly_data.GetScalarRange())
+def make_tubes(points_array, diameter_array):
+    clean_points_array = []
+    thresholded_diameters_array = []
+    colors_array = []
 
-    line_actor = vtk.vtkActor()
-    line_actor.SetMapper(line_mapper)
+    x_angles = 0
+    y_angles = 0
+    z_angles = 0
 
-    tube_actor = vtk.vtkActor()
-    tube_actor.SetMapper(tube_mapper)
+    for i in range(len(points_array)):
+        diameters = []
+        colors = []
+        points = []
+        if len(points_array[i]) > 3:
+            for j in range(len(points_array[i])):
+                if diameter_array[points_array[i][j][0]][points_array[i][j][1]][points_array[i][j][2]] < 0.3:
+                    diameter_array[points_array[i][j][0]][points_array[i][j][1]][points_array[i][j][2]] = 0.3
 
-    return tube_actor, line_actor
+                diameter_array[points_array[i][j][0]][points_array[i][j][1]][points_array[i][j][2]] *= 0.5
+                diameters.append(diameter_array[points_array[i][j][0]][points_array[i][j][1]][points_array[i][j][2]])
+
+                points.append(points_array[i][j])
+
+                if j > 0:
+                    angles = calculate_angles(points_array[i][j - 1], points_array[i][j])
+                else:
+                    angles = calculate_angles(points_array[i][j], points_array[i][j + 1])
+
+                rgb = angle_to_rgb(angles)
+                x_angles += angles[0]
+                y_angles += angles[1]
+                z_angles += angles[2]
+                colors.append(rgb)
+        clean_points_array.append(points)
+        thresholded_diameters_array.append(diameters)
+        colors_array.append(colors)
+
+    smoothed_lines = []
+    interpolated_diameters = []
+    interpolated_colors = []
+    for line in clean_points_array:
+        if len(line) > 3:
+            smoothed_line = []
+            transposed_points = np.transpose(line)
+            for dim in transposed_points:
+                smoothed_line.append(fit_univariated_spline_on_points(dim))
+            smoothed_lines.append(np.transpose(smoothed_line))
+    for diameter in thresholded_diameters_array:
+        if len(diameter) > 3:
+            interpolated_diameters.append(interpolate_points(diameter))
+    for color in colors_array:
+        if len(color) > 3:
+            interpolated_color = []
+            transposed_color = np.transpose(color)
+            for component in transposed_color:
+                interpolated_color.append(interpolate_points(component))
+            interpolated_colors.append(np.transpose(interpolated_color))
+
+    vessels_array = []
+    dti_array = []
+
+    for i in range(len(smoothed_lines)):
+        points = vtk.vtkPoints()
+        cells = vtk.vtkCellArray()
+        cells.InsertNextCell(len(smoothed_lines[i]))
+
+        diameters = vtk.vtkDoubleArray()
+        diameters.SetNumberOfTuples(len(smoothed_lines[i]))
+        diameters.SetName("VesselDiameter")
+
+        colors = vtk.vtkUnsignedCharArray()
+        colors.SetNumberOfComponents(3)
+        colors.SetName("Colors")
+
+        for j in range(len(smoothed_lines[i])):
+            points.InsertNextPoint(smoothed_lines[i][j])
+            cells.InsertCellPoint(j)
+            diameters.SetTuple1(j, interpolated_diameters[i][j])
+            colors.InsertNextTuple3(interpolated_colors[i][j][0], interpolated_colors[i][j][1], interpolated_colors[i][j][2])
+
+        tmp_line = vtk.vtkPolyData()
+        tmp_line.SetPoints(points)
+        tmp_line.SetLines(cells)
+
+        tmp_vessels = vtk.vtkPolyData()
+        tmp_vessels.DeepCopy(tmp_line)
+        tmp_vessels.GetPointData().AddArray(diameters)
+        tmp_vessels.GetPointData().SetActiveScalars("VesselDiameter")
+
+        tmp_dti = vtk.vtkPolyData()
+        tmp_dti.DeepCopy(tmp_line)
+        tmp_dti.GetPointData().SetScalars(colors)
+
+        vessels_array.append(tmp_vessels)
+        dti_array.append(tmp_dti)
+
+    vessels = assembly(vessels_array)
+    dti = assembly(dti_array)
+
+    return vessels, dti, [x_angles, y_angles, z_angles]
+
+
+def fit_univariated_spline_on_points(points):
+    x = np.linspace(0, 1, num=len(points), endpoint=True)
+    spline = UnivariateSpline(x, points)
+    new_points = spline(np.linspace(0, 1, len(points)*10))
+    return new_points
+
+
+def interpolate_points(points):
+    x = np.linspace(0, 1, num=len(points), endpoint=True)
+
+    f = interp1d(x, points)
+    return f((np.linspace(0, 1, num=len(points)*10, endpoint=True)))
+
+
+# ===========================================================
 
 
 def assembly(polydata_array):
@@ -202,79 +367,73 @@ def assembly(polydata_array):
     return clean_filter.GetOutput()
 
 
-def make_tubes(points_array, diameter_array):
-    polydata_array = []
-    for i in range(len(points_array)):
-        if len(points_array[i]) > 1:
-            points = vtk.vtkPoints()
-            diameters = []
+# ===========================================================
 
-            for j in range(len(points_array[i])):
-                if diameter_array[points_array[i][j][0]][points_array[i][j][1]][points_array[i][j][2]] < 0.3:
-                    diameter_array[points_array[i][j][0]][points_array[i][j][1]][points_array[i][j][2]] = 0.3
-
-                diameter_array[points_array[i][j][0]][points_array[i][j][1]][points_array[i][j][2]] *= 0.5
-                points.InsertNextPoint(points_array[i][j])
-                diameters.append(diameter_array[points_array[i][j][0]][points_array[i][j][1]][points_array[i][j][2]])
-
-            if points.GetNumberOfPoints() > 1:
-                tmp_polydata = make_polydata(points, diameters)
-                polydata_array.append(tmp_polydata)
-
-    polydata = assembly(polydata_array)
-    tube_actor, line_actor = make_actors(polydata)
-
-    return tube_actor, line_actor
+def magnitude(p):
+    summa = 0
+    for x in p:
+        summa += x * x
+    return np.sqrt(summa)
 
 
-def render(actors):
-    renderer = vtk.vtkRenderer()
+def dot_product(u, v):
+    summa = 0
+    for i in range(len(u)):
+        summa += u[i] * v[i]
+    return summa
 
-    render_window = vtk.vtkRenderWindow()
-    render_window.AddRenderer(renderer)
 
-    interactor = vtk.vtkRenderWindowInteractor()
-    interactor.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
-    interactor.SetRenderWindow(render_window)
+def calculate_angles(p1, p2):
+    vector = []
+    for i in range(len(p1)):
+        vector.append(p1[i] - p2[i])
+    theta_x = np.rad2deg((np.arccos(dot_product(vector, [1, 0, 0]) / magnitude(vector))) / 2)
+    theta_y = np.rad2deg((np.arccos(dot_product(vector, [0, 1, 0]) / magnitude(vector))) / 2)
+    theta_z = np.rad2deg((np.arccos(dot_product(vector, [0, 0, 1]) / magnitude(vector))) / 2)
+    return [theta_x, theta_y, theta_z]
 
-    for actor in actors:
-        actor.GetProperty().SetRepresentationToWireframe()
-        renderer.AddActor(actor)
 
-    renderer.SetBackground(0.1, 0.2, 0.4)
-    render_window.SetSize(800, 800)
+def angle_to_rgb(angles):
+    new = []
+    for angle in angles:
+        new.append(int((angle / 90) * 255))
+    return new
 
-    interactor.Initialize()
 
-    renderer.ResetCamera()
-    renderer.GetActiveCamera().Zoom(1.5)
-    render_window.Render()
+def scale(value, max_current, max_new=1):
+    return (value / max_current) * max_new
 
-    interactor.Start()
 
-# ============================================================================================7
+# ============================================================
+
 
 skeleton_filenames = []
 diameter_filenames = []
 
+read_folder = "read/folder/"
+write_folder = "write/folder/"
 
-read_folder = "path"
-write_folder = folder = "path"
+for n in range(2, 12):
+    skeleton_filenames.append("skeleton_files")
+    diameter_filenames.append("diameter_files")
 
-for i in range(2, 12):
-    skeleton_filenames.append("filename")
-    diameter_filenames.append("filename")
+for n in range(len(skeleton_filenames)):
+    img = nib.load(read_folder + skeleton_filenames[n] + ".nii.gz")
+    skeleton_data = np.array(img.dataobj)
 
-for i in range(len(skeleton_filenames)):
-    img = nib.load(read_folder + skeleton_filenames[i] + ".nii.gz")
-    a = np.array(img.dataobj)
+    img = nib.load(read_folder + diameter_filenames[n] + ".nii.gz")
+    diameter_data = np.array(img.dataobj)
 
-    img = nib.load(read_folder + diameter_filenames[i] + ".nii.gz")
-    r = np.array(img.dataobj)
+    skeleton = make_skeleton(skeleton_data)
 
-    tube_actor, line_actor = make_skeleton(a, r)
+    vessels_polydata, dti_polydata, sum_angles = make_tubes(skeleton, diameter_data)
 
-    write_vtk(tube_actor, write_folder + diameter_filenames[i])
-    write_vtk(line_actor, write_folder + skeleton_filenames[i])
+    write_vtk(vessels_polydata, write_folder + diameter_filenames[n] + "_approx_spline")
+    write_vtk(dti_polydata, write_folder + skeleton_filenames[n] + "_approx_spline_dti")
 
-    #render([tube_actor, line_actor])
+    vessels_actor, skeleton_actor, dti_actor = make_actors(vessels_polydata, dti_polydata)
+
+    make_stats(skeleton, diameter_data, sum_angles)
+
+    render([vessels_actor, skeleton_actor, dti_actor])
+
